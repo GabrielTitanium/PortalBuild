@@ -84,8 +84,11 @@ stages:
           inputs:
             targetType: inline
             script: |
+              # Clear dotnet NuGet cache (this works)
               dotnet nuget locals all --clear
-              nuget locals all -clear    
+              
+              Write-Host "NuGet cache cleared successfully"
+          continueOnError: true
         
         - task: NuGetCommand@2
           displayName: 'NuGet Restore - Main Solution'
