@@ -78,22 +78,33 @@ stages:
         - task: DockerInstaller@0
           displayName: 'Install Docker 17.09.0-ce'
           enabled: false
- 
+        
+        - task: PowerShell@2
+          displayName: 'Clear NuGet Cache'
+          inputs:
+            targetType: inline
+            script: |
+              dotnet nuget locals all --clear
+              nuget locals all -clear    
+        
         - task: NuGetCommand@2
-          displayName: 'NuGet Restore'
+          displayName: 'NuGet Restore - Main Solution'
           inputs:
             restoreSolution: WebServices.sln
+            arguments: '-DisableParallelProcessing'
+          timeoutInMinutes: 30
+          continueOnError: false
  
         - task: DotNetCoreCLI@2
-          displayName: 'dotnet restore'
+          displayName: 'dotnet restore - Additional Projects'
           inputs:
             command: restore
             projects: |
               thirdparty\MessageMedia\messages-csharp-sdk-master\MessageMediaMessages.Standard
               Render\Spark.Render.Entities
               Portal\**/*.csproj
-            verbosityRestore: Detailed
-            verbosityPack: Detailed
+            verbosityRestore: Normal  # Change from Detailed to reduce logging
+          timeoutInMinutes: 20
  
         - powershell: |
             (Get-Content .\Shared\CommonVersionInfo.cs) |
