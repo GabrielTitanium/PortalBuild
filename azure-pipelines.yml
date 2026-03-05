@@ -1,0 +1,267 @@
+trigger: none
+ 
+variables:
+- group: Keylocker
+- group: SVNCredentials
+- group: TestTrunkVariables
+- group: Azure Connection
+ 
+- name: SVN_URL
+  value: https://sparksource-titaniumsolutionsltd.msappproxy.net/repos/Salud/Services/Trunk
+- name: SVN_REVISION_TO_CHECKOUT
+  value: HEAD
+- name: NUGET_PACKAGES
+  value: 'c:/NugetPackageCache'
+- name: TIWEBDB_SUFFIX_NAME
+  value: $(Build.Repository.Name)
+ 
+ 
+pool:
+  name: Default
+  demands: 
+  - msbuild
+  - Cmd
+  - vstest
+ 
+stages:
+  - stage: Build
+    displayName: 'Build'
+    isSkippable: false
+    jobs:
+      - job: BuildJob
+        displayName: Build
+        variables:
+          build_is_signed: $[ dependencies.BuildJob.outputs['SetBuildVars.build_is_signed'] ]
+        workspace:
+          clean: all
+        timeoutInMinutes: 360
+        cancelTimeoutInMinutes: 1
+        steps:
+       
+        - task: CmdLine@2
+          displayName: 'Install Angular CLI 14.2.5'
+          inputs:
+            script: 'npm install -g @angular/cli@14.2.5'
+        # Checkout via svn directly into the sources folder
+        - task: PowerShell@2
+          displayName: Checkout via svn
+          inputs:
+            targetType: inline
+            script: |
+              $rev  = "$(SVN_REVISION_TO_CHECKOUT)"
+              $dest = "$(Build.SourcesDirectory)"
+ 
+              Write-Host "▶︎ Checking out revision $rev from $(SVN_URL) into $dest…"
+              & svn checkout "$(SVN_URL)" `
+                  --username    "$(SVN_USERNAME)" `
+                  --password    "$(SVN_PASSWORD)" `
+                  --non-interactive `
+                  --no-auth-cache `
+                  --trust-server-cert `
+                  --revision    $rev `
+                  --depth       infinity `
+                  $dest
+        - powershell: 'Get-PSDrive C'
+          displayName: 'Get-PSDrive C'
+          continueOnError: true
+ 
+        - task: DownloadSecureFile@1
+          displayName: 'Download CodeSign Cert'
+          inputs:
+            secureFile: 'f6497d3e-0277-426f-bbbf-c32567b0137b'
+
+        - task: UseDotNet@2
+          displayName: 'Use .NET Core sdk '
+          inputs:
+            installationPath: 'C:\program files\dotnet\'
+ 
+        - task: DockerInstaller@0
+          displayName: 'Install Docker 17.09.0-ce'
+          enabled: false
+ 
+        - task: NuGetCommand@2
+          displayName: 'NuGet Restore'
+          inputs:
+            restoreSolution: WebServices.sln
+ 
+        - task: DotNetCoreCLI@2
+          displayName: 'dotnet restore'
+          inputs:
+            command: restore
+            projects: |
+              thirdparty\MessageMedia\messages-csharp-sdk-master\MessageMediaMessages.Standard
+              Render\Spark.Render.Entities
+              Portal\**/*.csproj
+            verbosityRestore: Detailed
+            verbosityPack: Detailed
+ 
+        - powershell: |
+            (Get-Content .\Shared\CommonVersionInfo.cs) |
+            Foreach-Object{if($_ -match "AssemblyFileVersion"){$version = $_}};
+            $version = [string] [regex]::Match($version, "\d+.\d+.\d+")
+            echo $version
+           
+           
+            # Define the path to the package.json file
+            #$jsonFilePath = ".\Portal\PortalAngular\package.json"
+           
+            # Read the content of the JSON file
+            #$jsonContent = Get-Content -Path $jsonFilePath -Raw | ConvertFrom-Json
+           
+            # Retrieve the version property
+            #$version = $jsonContent.version
+           
+            # Define the path to the output file in the artifact staging directory
+            $outputFilePath = "$(Build.ArtifactStagingDirectory)\version.txt"
+           
+            # Save the version to the output file
+            $version | Out-File -FilePath $outputFilePath
+           
+            # Display the version on the screen
+            Write-Host "Patient Portal Version: $version"
+           
+            # Output the path of the version file for reference in the pipeline logs
+            Write-Host "Version file saved to: $outputFilePath"
+          displayName: 'Get Current Patient Portal Version Number'
+ 
+       
+ 
+        - powershell: |
+            $dir = Get-Location
+            Write-Host "Current directory is $dir. Patient Portal FrontEnd Build process started!"
+ 
+            if ((Test-Path -Path "$dir\Portal\PortalAngular") -eq $true)
+            {
+              Write-Host "Patient portal found. starting NPM packages installation"
+              cd Portal
+              cd PortalAngular
+              npm ci
+              Write-Host "Starting Angular Build"
+              npx ng version
+              npx ng build --deploy-url='/web/' --configuration production --progress   
+            }
+            cd $dir
+          displayName: 'Build Patient Portal Front End'
+ 
+        - powershell: |
+            Write-Host "Deployment process started"
+            $dir = Get-Location
+            Write-Host "Current directory is $dir. Patient Portal Services build started!"
+ 
+            # Remove previous build
+            if ((Test-Path -Path "$dir\Portal\SaludPortal\") -eq $true)
+            {
+                Write-Host "Removing previous Deployment Build"
+                Remove-Item "$dir\Portal\SaludPortal\" -Recurse
+            }
+            # Delete previous zip file
+            if ((Test-Path -Path "$dir\Portal\SaludPortal.zip") -eq $true)
+            {
+                Write-Host "Removing previous Deployment Build"
+                Remove-Item "$dir\Portal\SaludPortal.zip"
+            }
+ 
+            # Create folder for new build
+            if ((Test-Path -Path "$dir\Portal\SaludPortal\") -eq $false)
+            {
+                Write-Host "Creating folder for new build"
+                Write-Host "Creating SaludPortal directory"
+                #md -path "$dir\Portal\SaludPortal\"
+                New-Item -ItemType Directory -Path "$dir\Portal\SaludPortal\web\" -Force
+            }
+ 
+            cd $dir
+ 
+          displayName: 'Clear previous build and create new folder for Patient Portal'
+ 
+        - task: MSBuild@1
+          displayName: 'Build Portal'
+          inputs:
+            solution: '**/Portal/Titanium.Portal.Host/Titanium.Portal.Host.csproj'
+            platform: AnyCPU
+            configuration: 'Release '
+            msbuildArguments: '/p:DeployOnBuild=true /p:PublishProfile="FolderProfile"  '
+            clean: true
+ 
+        - powershell: |
+            $dir = Get-Location
+            Write-Host "Current directory is $dir. Patient Portal Services build started!"
+           
+            #check if portal build exists
+            if ((Test-Path -Path "$dir\Portal\Titanium.Portal.Host\bin\app.publish\") -eq $true)
+            {
+              Write-Host "Portal build exists inside $dir\Portal\Titanium.Portal.Host\bin\app.publish\"
+            }
+            else
+            {
+              Write-Host "WARNING! Portal build don't Exists inside $dir\Portal\Titanium.Portal.Host\bin\app.publish\"
+            }
+           
+            # Copy patient Portal Services to new folder
+            if ((Test-Path -Path "$dir\Portal") -eq $true)
+            {
+                Write-Host "Copy Portal Host"
+                Copy-Item -Path "$dir\Portal\Titanium.Portal.Host\bin\app.publish\*" -Destination "$dir\Portal\SaludPortal\" -Recurse
+                Write-Host "Titanium Portal Host copied to $dir\Portal\SaludPortal\ folder"
+            }
+           
+            # Copy patient Potal Front End to new folder
+            if((Test-Path -Path "$dir\Portal\PortalAngular\dist") -eq $true)
+            {
+                Write-Host "$dir\Portal\PortalAngular\dist found Copying Portal Front End Build"
+                $sourcePath = Join-Path $dir "Portal\PortalAngular\dist"
+                $destinationPath = Join-Path $dir "Portal\SaludPortal\web"
+                if((Test-Path -Path "$dir\Portal\SaludPortal\web") -eq $true){
+                    Write-Host "$dir\Portal\SaludPortal\web found ... copying ..."
+                    robocopy $sourcePath $destinationPath /E
+                 
+                    Write-Host "Front End build copied to $dir\Portal\SaludPortal\web\ folder"
+                }else
+                {
+                    Write-Host "Could not find $dir\Portal\SaludPortal\web"
+                }
+            }
+           
+            cd $dir
+            exit 0
+          errorActionPreference: default
+          displayName: 'Copy Patient Portal Build'
+          continueOnError: true
+ 
+        - script: |
+            copy Portal\SaludPortal $(Build.ArtifactStagingDirectory)\Portal\
+            exit 0
+          displayName: 'Copy Portal To Artifact Directory'
+          enabled: false
+          continueOnError: true
+ 
+        - task: ArchiveFiles@2
+          displayName: 'Archive Portal'
+          inputs:
+            rootFolderOrFile: 'Portal\SaludPortal'
+            archiveFile: '$(Build.ArtifactStagingDirectory)/SaludPortal.zip'
+          continueOnError: true
+ 
+        - task: PublishPipelineArtifact@1
+          displayName: 'Publish Artifact: drop'
+          inputs:
+            targetPath: '$(Build.ArtifactStagingDirectory)'
+            artifact: 'drop'
+            publishLocation: 'pipeline'
+          continueOnError: true
+ 
+        - powershell: |
+            $msbuildProcesses = Get-Process -ProcessName "MSBuild*" -ea SilentlyContinue
+            if ($msbuildProcesses) {
+                Write-Host "... Pre-build check: Found running MSBuild process. Force terminating it!"
+                Stop-Process -ProcessName "MSBuild*" -Force
+            }
+           
+            $wixToolsetLinkerProcesses = Get-Process -ProcessName "WiX Toolset Linker*" -ea SilentlyContinue
+            if ($wixToolsetLinkerProcesses) {
+                Write-Host "... Pre-build check: Found running WiX Toolset Linker process. Force terminating it!"
+                Stop-Process -ProcessName "WiX Toolset Linker*" -Force
+            }
+           
+            # Use the environment variables input below to pass secret variables to this script.
+          displayName: 'Terminate MSBuild process'
